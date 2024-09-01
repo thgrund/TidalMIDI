@@ -1,0 +1,3 @@
+import Sound.MIDI.File.Load (showFile, fromFile)
+
+showFile "/Users/mrreason/Development/tidalcycles/TidalMIDI/examples/midi/TwoVoicesOneTrack.mid"

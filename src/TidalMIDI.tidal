@@ -1,0 +1,98 @@
+import Data.List (groupBy)
+import Data.Maybe (fromMaybe)
+import Sound.Tidal.Context
+
+import Data.Ratio ((%))
+import Data.List (foldl', sortOn)
+import qualified Data.Map as Map
+import Sound.Tidal.Context (Arc(..), Event(..), Pattern, Value(..))
+
+import qualified Sound.MIDI.Message.Channel.Voice as VoiceMsg
+import qualified Sound.MIDI.Message.Channel       as ChannelMsg
+import qualified Sound.MIDI.File            as MidiFile
+import qualified Sound.MIDI.File.Event      as Event
+import qualified Sound.MIDI.File.Event.Meta as MetaEvent
+
+import qualified Data.EventList.Relative.TimeBody as EventList
+
+import Sound.MIDI.File.Save (toFile)
+import Sound.MIDI.General
+
+
+groupedEvents pt arc = groupBy (\ev1 ev2 -> whole ev1 == whole ev2) (sortOn part $ queryArc pt arc)
+
+extractNote (VN x) = unNote x
+extractNote _ = 0
+
+transformToMidi (Event c (Just (Arc s e)) _ v) =
+  let noteValue = fromMaybe (VN 0) (Data.Map.lookup "note" v)
+  in (s, e , extractNote noteValue)
+transformToMidi _ = error "Unexpected event without arc"
+
+-- Helper function to extract the note value
+
+convertToDesiredOutput = map (map transformToMidi)
+
+-- Tick = 1 quarter note
+tick = 480
+-- 4 Tick represent one bar in 4/4
+ticksPerCycle = tick * 4
+chan = ChannelMsg.toChannel 3
+vel  = VoiceMsg.toVelocity 64
+
+durationToTicks dur = round (fromRational dur * fromIntegral ticksPerCycle)
+
+-- TODOS
+-- Just a apply the offset on the first element
+calculateOffsets events = reverse $ addOffsets $ reverse events
+  where addOffsets [] = []
+        addOffsets (x:[]) = [((\(a, b, c) -> (a, b, c, a)) (head x)) : (map (\(a, b, c) -> (a, b, c, 0 % 1)) (tail x))] ++ addOffsets []
+        addOffsets (x:y:xs) = [
+            ((\(a, b, c) -> (a, b, c, a - (snd3 (head y)))) (head x)) :
+            (map (\(a, b, c) -> (a, b, c, 0)) (tail x))
+          ] ++ addOffsets (y : xs)
+        snd3 (_, b, _) = b
+
+convertEvent events =
+  let noteOnEvents = map (\(_, _, note, offset) -> (durationToTicks offset, note + 60)) events
+      noteOffEvents = zipWith (\(start, end, note, _) idx ->
+                      (if idx == 0 then durationToTicks (end - start) else 0, (note + 60))) events [0..]
+  in Data.Map.fromList [("noteOff", noteOffEvents), ("noteOn", noteOnEvents)]
+
+convert eventType x =
+  let msgType = if eventType == "noteOn" then VoiceMsg.NoteOn else VoiceMsg.NoteOff
+  in map (\event ->
+       map (\(x, y) ->
+         (x, Event.MIDIEvent
+           (ChannelMsg.Cons chan
+             (ChannelMsg.Voice (msgType (VoiceMsg.toPitch (round y)) vel))))
+         ) (Data.Map.findWithDefault [(0, 60.0)] eventType (event))
+      ) x
+
+d pt arc = concat $ zipWith (++) (convert "noteOn" a)  (convert "noteOff" a)
+  where
+    a = map convertEvent ( calculateOffsets (convertToDesiredOutput $ groupedEvents (pt) (arc)))
+
+cmaj pt=
+   let chan = ChannelMsg.toChannel 3
+       vel  = VoiceMsg.toVelocity 64
+       bpm = 130.0
+   in  MidiFile.Cons MidiFile.Parallel (MidiFile.Ticks 480)
+      [ EventList.fromPairList $
+         (0, Event.MetaEvent (MetaEvent.SetTempo (round ((1.0 / bpm) * 60000000)))) :
+         (0, Event.MetaEvent (MetaEvent.TrackName (show AcousticGrandPiano))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (VoiceMsg.ProgramChange (instrumentToProgram AcousticGrandPiano))))):
+         (d (pt) (Arc 0 8))]
+
+
+-- Convert this Tidal pattern to MIDI
+do
+let s1 = sheet {
+    key = "b5" |- 2,
+    mode = "dorian",
+    numerals = "<5#o 0 1 2>"
+    }
+    pt =  prog s1 (every 2 rev $ "[1 3 5] 7 ~ 8") # s "superpiano"
+toFile "/Users/mrreason/Documents/MidiExample/1.mid" $ cmaj (pt)
+
+d1 $ qt $ pt
