@@ -1,4 +1,4 @@
-import Data.List (groupBy)
+import Data.List (groupBy, nub)
 import Data.Maybe (fromMaybe)
 import Sound.Tidal.Context
 
@@ -18,11 +18,13 @@ import qualified Data.EventList.Relative.TimeBody as EventList
 import Sound.MIDI.File.Save (toFile)
 import Sound.MIDI.General
 
-
 groupedEvents pt arc = groupBy (\ev1 ev2 -> whole ev1 == whole ev2) (sortOn part $ queryArc pt arc)
 
 extractNote (VN x) = unNote x
 extractNote _ = 0
+
+extractString (VS x) = x
+extractString _ = ""
 
 transformToMidi (Event c (Just (Arc s e)) _ v) =
   let noteValue = fromMaybe (VN 0) (Data.Map.lookup "note" v)
@@ -96,14 +98,14 @@ sortNoteOnEventsByEndTime (_, b1, _) (_, b2, _)
 
 d pt arc = concat $ zipWith (++) (convert "noteOn" rawNoteOnList)  (convert "noteOff" rawNoteOffList)
   where
-    noteEventList = convertToDesiredOutput $ groupedEvents (pt) (arc)
+    noteEventList = map nub $ convertToDesiredOutput $ groupedEvents (pt) (arc)
     rawNoteOnList = map (convertEvent "noteOn") $ calculateOffsets $ map (sortBy sortNoteOnEventsByEndTime) $ groupBy (\(a1, _, _) (a2, _, _) -> a1 == a2)
       $ sortBy(sortNoteOnEventsByStartTime) $ concat noteEventList
     rawNoteOffList =  map (convertEvent "noteOff") $  calculateEmptyOffsets $ map (sortBy sortNoteOffEventsByStartTime)
         $ groupBy (\(_, b1, _) (_, b2, _) -> b1 == b2)
         $ sortBy (sortNoteOffEventsByEndTime) $ concat noteEventList
 
-cmaj pt=
+cmaj pt dur=
    let chan = ChannelMsg.toChannel 3
        vel  = VoiceMsg.toVelocity 64
        bpm = 80.0
@@ -112,110 +114,4 @@ cmaj pt=
          (0, Event.MetaEvent (MetaEvent.SetTempo (round ((1.0 / bpm) * 60000000)))) :
          (0, Event.MetaEvent (MetaEvent.TrackName (show AcousticGuitarNylon))):
          (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (VoiceMsg.ProgramChange (instrumentToProgram AcousticGuitarNylon))))):
-         (d (pt) (Arc 0 16))]
-
-
-
--- Convert this Tidal pattern to MIDI
-do
-let s1 = sheet {
-    key = "b5" |- 2,
-    mode = "dorian",
-    numerals = "<5#o 0 1 2>"
-    }
-    pt =  stack [
-          open "t" $ prog s1 "[1,3,5,7]*<1!4 2! 1!>" |- note 12 # gain 0.7
-          , prog s1 "[7 3 5 4]*2" |% note 12 |+ note 12
-          ] # s "piano"
-toFile "/Users/mrreason/Documents/MidiExample/1.mid" $ cmaj (pt)
-
--- Convert this Tidal pattern to MIDI
-do
-let s2 = sheet {
-      key = "b5" |- 2,
-      mode = "dorian",
-      numerals = "<1 1 0 0 1 1 0 0 -1 5#s 0 5#o 3#H7 2#s 1 5#s>"
-    }
-    pt =  while "<t!8 f!8>" (superimpose rev)
-             $ s "[viking, lead]"
-               <| prog s2 (
-               "<[1 3 <5!6 4 5> 7 7 3 <5!6 4 5> 1]*2 [1 7 3 <5!6 4 5> 8 3 7 <5!6 4 5>]*<2 1>>" )
-             |- note "[12 24 24 12]"
-             # legato 0.8
-toFile "/Users/mrreason/Documents/MidiExample/2.mid" $ cmaj (pt)
-
-
-do
-let s1 = sheet {
-      key = "c",
-      mode = "H1",
-      numerals = "3#H1"
-    }
-    pt = seqP [
-        (0,4, silence),
-        (4,11,
-          -- superimpose ((# s "sally") . (|- note 12)) $
-          s "fbass" # n "[5,6]"
-          <| prog s1 "<[1 1 2 1 3 1 4 5] [6 1 1 5 3 1 4 1] [4 3 1 2 1 0 0 1] [1 1 1 3 2 1 1 1]>"
-          # legato 0.8 |+ note 12 # shape 0.85)
-        , (11,12, s "fbass" # n "[5,6]"
-            <| prog s1 "1 1 ~!6" |+ note 12
-            # legato 0.8 # shape 0.85 )
-       ]
-toFile "/Users/mrreason/Documents/MidiExample/3.mid" $ cmaj (pt)
-
-
-
-d1 $ qt $ pt
-
-noteEventList = convertToDesiredOutput $ groupedEvents (note "[c'maj, c6 ~ g6 b7]") (Arc 0 1)
-rawNoteOnList = calculateOffsets $ map (sortBy sortNoteOnEventsByEndTime) $ groupBy (\(a1, _, _) (a2, _, _) -> a1 == a2)
-  $ sortBy(sortNoteOnEventsByStartTime) $ concat noteEventList
-rawNoteOffList =  calculateEmptyOffsets $ map (sortBy sortNoteOffEventsByStartTime)
-    $ groupBy (\(_, b1, _) (_, b2, _) -> b1 == b2)
-    $ sortBy (sortNoteOffEventsByEndTime) $ concat noteEventList
-
-map (convertEvent "noteOff") rawNoteOnList
-
-map (convertEvent "noteOn") rawNoteOnList
-
-calculateOffsets $ rawNoteOffList
-
-rawNoteOffList
-#
-
- note "[c'maj'4, c4 e4 g4 b4]"
-
--- rawNoteOnList
---   - [x] groupBy Start Time
---   - [x] Sort event list (smallest end time first)
---   - current event start - prev event end = pause Length
--- rawNoteOffList
---   - current event end - start = noteLength
---   - [x] Sort event list (biggest start time first)
-
-
-[[(0 % 1,1 % 4,12.0,0 % 1)]
-,[(1 % 2,3 % 4,19.0,1 % 4)]
-,[(3 % 4,1 % 1,35.0,0 % 1),(0 % 1,1 % 1,0.0,0 % 1),(0 % 1,1 % 1,4.0,0 % 1),(0 % 1,1 % 1,7.0,0 % 1)]]
-
-
-rawNoteOnList
-rawNoteOffList
--- Note Off
-[[(0 % 1,1 % 4,12.0)]
-,[(1 % 4,1 % 2,16.0)]
-,[(1 % 2,3 % 4,19.0)]
-,[(3 % 4,1 % 1,35.0),(0 % 1,1 % 1,7.0),(0 % 1,1 % 1,4.0),(0 % 1,1 % 1,0.0)]]
-
--- Note On
-[[(0 % 1,1 % 4,12.0)]
-,[(0 % 1,1 % 1,0.0),(0 % 1,1 % 1,4.0),(0 % 1,1 % 1,7.0)]
-,[(1 % 4,1 % 2,16.0)]
-,[(1 % 2,3 % 4,19.0)]
-,[(3 % 4,1 % 1,35.0)]]
-
-pt = stack [
-    open "t" $ prog s1 "[1,3,5,7]*<1!4 2! 1!>" |- note 12 # gain 0.7
-    , prog s1 "[7 3 5 4]*2" |% note 12 |+ note 12
-    ] # s "piano"
+         (d (pt) (Arc 0 dur))]
