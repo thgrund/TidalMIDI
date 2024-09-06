@@ -44,6 +44,18 @@ vel  = VoiceMsg.toVelocity 64
 
 durationToTicks dur = round (fromRational dur * fromIntegral ticksPerCycle)
 
+addDurSum acc [] = []
+addDurSum acc ((a, b, c):[]) = (a,b,c, acc + b) : (addDurSum (acc + b) [])
+addDurSum acc ((a,b,c):xs) = (a,b,c, acc + b) : (addDurSum (acc + b) xs)
+
+transformDur [] [] = []
+transformDur [] ((a2,b2,c2,_):[]) =  (a2,b2,c2) : (transformDur [] [])
+transformDur [] ((a2,b2,c2,_):xs) = ((a2,b2,c2)) : (transformDur [] xs)
+transformDur ((a1, b1, c1):xs) [] = []  -- Second list empty, stop transformation
+transformDur ((a1, b1, c1):xs) ((a2, b2, c2, e2):ys)
+  | a1 >= e2 = (a2, (b1 / (2 ^^ c1)) * b2, c2) : transformDur ((a1, b1, c1):xs) ys
+  | otherwise          = transformDur xs ((a2, b2, c2, e2):ys)
+
 -- TODOS
 -- Just a apply the offset on the first element
 calculateOffsets events = reverse $ addOffsets $ reverse events
@@ -55,63 +67,82 @@ calculateOffsets events = reverse $ addOffsets $ reverse events
           ] ++ addOffsets (y : xs)
         snd3 (_, b, _) = b
 
-calculateEmptyOffsets events = reverse $ addOffsets $ reverse events
-  where addOffsets [] = []
-        addOffsets (x:[]) = (map (\(a, b, c) -> (a, b, c, 0 % 1)) x) : addOffsets []
-        addOffsets (x:xs) = (map (\(a, b, c) -> (a, b, c, 0 % 1)) x) : addOffsets xs
-
-convertEvent eventType events =
-  let noteOnEvents = map (\(_, _, note, offset) -> (durationToTicks offset, note + 60)) events
-      noteOffEvents = zipWith (\(start, end, note, _) idx ->
-                      (if idx == 0 then durationToTicks (end - start) else 0, (note + 60))) events [0..]
-  in Data.Map.fromList [if (eventType == "noteOff") then ("noteOff", noteOffEvents) else ("noteOn", noteOnEvents)]
-
-convert eventType x =
-  let msgType = if eventType == "noteOn" then VoiceMsg.NoteOn else VoiceMsg.NoteOff
-  in map (\event ->
-       map (\(x, y) ->
-         (x, Event.MIDIEvent
-           (ChannelMsg.Cons chan
-             (ChannelMsg.Voice (msgType (VoiceMsg.toPitch (round y)) vel))))
-         ) (Data.Map.findWithDefault [(0, 60.0)] eventType (event))
-      ) x
-
-sortNoteOffEventsByStartTime (a1, _, _) (a2, _, _)
-  | a1 < a2 = GT
-  | a1 > a2 = LT
-  | a1 == a2 = EQ
 
 sortNoteOffEventsByEndTime (_, b1, _) (_, b2, _)
   | b1 > b2 = GT
   | b1 < b2 = LT
   | b1 == b2 = EQ
 
-sortNoteOnEventsByStartTime (a1, _, _) (a2, _, _)
-  | a1 > a2 = GT
-  | a1 < a2 = LT
-  | a1 == a2 = EQ
-
-sortNoteOnEventsByEndTime (_, b1, _) (_, b2, _)
-    | b1 > b2 = GT
-    | b1 < b2 = LT
-    | b1 == b2 = EQ
-
-d pt arc = concat $ zipWith (++) (convert "noteOn" rawNoteOnList)  (convert "noteOff" rawNoteOffList)
+d pt arc ts= map (convert) groupedMidiNoteEvents
   where
     noteEventList = map nub $ convertToDesiredOutput $ groupedEvents (pt) (arc)
-    rawNoteOnList = map (convertEvent "noteOn") $ calculateOffsets $ map (sortBy sortNoteOnEventsByEndTime) $ groupBy (\(a1, _, _) (a2, _, _) -> a1 == a2)
-      $ sortBy(sortNoteOnEventsByStartTime) $ concat noteEventList
-    rawNoteOffList =  map (convertEvent "noteOff") $  calculateEmptyOffsets $ map (sortBy sortNoteOffEventsByStartTime)
-        $ groupBy (\(_, b1, _) (_, b2, _) -> b1 == b2)
-        $ sortBy (sortNoteOffEventsByEndTime) $ concat noteEventList
+    groupedMidiNoteEvents = transformDur ts (addDurSum 0 $ calculateOffsets $ sortBy (sortNoteOffEventsByEndTime) $ (map (\(s, e, v) -> ("noteOff", e, v)) (concat noteEventList)) ++ (map (\(s, e, v) -> ("noteOn",s, v)) (concat noteEventList)))
+    calculateOffsets events = reverse $ addOffsets $ reverse events
+    addOffsets [] = []
+    addOffsets (x:[]) = x : addOffsets []
+    addOffsets ((a1, b1, c1):(a2, b2, c2):xs) = (a1, b1 - b2, c1) : addOffsets ((a2, b2, c2) : xs)
+    convert (eventType, duration, pitch) =
+      let msgType = if eventType == "noteOn" then VoiceMsg.NoteOn else VoiceMsg.NoteOff
+      in  (durationToTicks duration, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (msgType (VoiceMsg.toPitch ((round pitch) + 60)) vel))))
 
-cmaj pt dur=
+midiNoteTrack pt dur ts=
    let chan = ChannelMsg.toChannel 3
        vel  = VoiceMsg.toVelocity 64
-       bpm = 80.0
-   in  MidiFile.Cons MidiFile.Parallel (MidiFile.Ticks 480)
-      [ EventList.fromPairList $
-         (0, Event.MetaEvent (MetaEvent.SetTempo (round ((1.0 / bpm) * 60000000)))) :
+   in  EventList.fromPairList $
          (0, Event.MetaEvent (MetaEvent.TrackName (show AcousticGuitarNylon))):
          (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (VoiceMsg.ProgramChange (instrumentToProgram AcousticGuitarNylon))))):
-         (d (pt) (Arc 0 dur))]
+         (d (pt) (Arc 0 dur) ts)
+
+createSignatureEvent (a, b, c) = (round ((480 * (b / (2 ^^ c)) * 4) * a), Event.MetaEvent (MetaEvent.TimeSig (round b) c 24 8))
+
+-- Create time signature track for midiFile
+calculateTimeSignatures [] = []
+calculateTimeSignatures (x:[]) = createSignatureEvent (x) : (calculateTimeSignatures [])
+calculateTimeSignatures ((a1,b1,c1):(a2,b2,c2):xs) = (createSignatureEvent (a1 - a2, b1, c1)) : (calculateTimeSignatures ((a2,b2,c2):xs))
+
+shiftTimeSignatures [] = []  -- Handle empty list case
+shiftTimeSignatures ((x, event1):rest) = (0, event1) : shiftRest x rest
+  where
+    shiftRest _ [] = []
+    shiftRest prevTicks ((ticks, event):xs) = (prevTicks, event) : shiftRest ticks xs
+
+-- Tidal Drum
+
+midiDrumTrack pt dur ts=
+   let chan = ChannelMsg.toChannel 9
+       vel  = VoiceMsg.toVelocity 64
+   in  EventList.fromPairList $
+         (0, Event.MetaEvent (MetaEvent.TrackName ("DrumKit"))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (VoiceMsg.ProgramChange (drumProgram))))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 101) 0))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 100) 0))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 6) 6))):
+         (d (addDrumMidiNote pt) (Arc 0 dur) ts)
+
+addDrumMidiNote = withEvents aux
+         where aux es = concatMap (steppityIn) (groupBy (\a b -> whole a == whole b) $ es)
+               steppityIn xs = mapMaybe (\(n, ev) -> (transform ev)) $ enumerate xs
+               transform (Event c (Just (Arc s e)) a' v) = return (Event c (Just (Arc s e)) a' (newValueMap v))
+               noteValue v = fromMaybe (VN 0) (Data.Map.lookup "n" v)
+               soundValue v = fromMaybe (VS "") (Data.Map.lookup "s" v)
+               newValueMap x = insert "note" (VN ((mapTCDrumToGeneralMIDI (soundValue x, noteValue x)) - 60 )) x
+
+mapTCDrumToGeneralMIDI :: (Value, Value) -> Note
+mapTCDrumToGeneralMIDI (VS "bd", _) = 36
+mapTCDrumToGeneralMIDI (VS "sn", VN 4) = 37
+mapTCDrumToGeneralMIDI (VS "sn", _) = 38
+mapTCDrumToGeneralMIDI (VS "tom", VN 0) = 45
+mapTCDrumToGeneralMIDI (VS "tom", VN 1) = 43
+mapTCDrumToGeneralMIDI (VS "tom", VN 2) = 41
+mapTCDrumToGeneralMIDI (VS "hh", _) = 42
+mapTCDrumToGeneralMIDI (VS "hho", _) = 46
+mapTCDrumToGeneralMIDI (VS "rd", VN 0) = 51
+mapTCDrumToGeneralMIDI (VS "rd", VN 1) = 59
+mapTCDrumToGeneralMIDI (VS "rd", VN 2) = 53
+mapTCDrumToGeneralMIDI (VS "cr", VN 0) = 49
+mapTCDrumToGeneralMIDI (VS "cr", VN 1) = 49
+mapTCDrumToGeneralMIDI (VS "cr", VN 2) = 57
+mapTCDrumToGeneralMIDI (VS "cr", VN 3) = 57
+mapTCDrumToGeneralMIDI (VS "ch", _) = 52
+mapTCDrumToGeneralMIDI (VS "mi", _) = 55
+mapTCDrumToGeneralMIDI (_, _) = -1
