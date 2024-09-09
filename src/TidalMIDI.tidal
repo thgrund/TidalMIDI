@@ -24,7 +24,7 @@ data TidalMIDIScore = TidalMIDIScore {
     duration :: Time}
 
 midiScore = TidalMIDIScore {
-  timeSignatures = [(1 % 1, 2, 3)],
+  timeSignatures = [(1 % 1, 4, 2)],
   bpm = 120,
   duration = 4
 }
@@ -185,7 +185,7 @@ mapTCDrumToGeneralMIDI (VS "ch", _) = 52
 mapTCDrumToGeneralMIDI (VS "mi", _) = 55
 mapTCDrumToGeneralMIDI (_, _) = -1
 
-addDrumMidiNote :: (Ord k, Data.String.IsString k) => 
+addDrumMidiNote :: (Ord k, Data.String.IsString k) =>
     Pattern (Map.Map k Value)
     -> Pattern (Map.Map k Value)
 addDrumMidiNote = withEvents aux
