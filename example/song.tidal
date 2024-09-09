@@ -1,0 +1,37 @@
+
+import Data.Map (fromList)
+
+let trackScale n = (Sound.Tidal.Context.scale "major" (n + "<0 4 5 2 2 4 0 0>"))
+    rhytm = "<[t@2 t t@3] [t ~ t ~ t t] [t*3 t*3 t!4] [t*6] ~! [t ~ t ~ t t] [t*3 t*3 t!4]>"
+    tcTracks = Data.Map.fromList [
+      ("lead", s "lead" <| note (trackScale "<[1 4 9 8 9 12] [3@2 5 1@2 2] [2@3 1@1 5@2]>"))
+      , ("piano", s "superpiano" <| stack [
+          note (trackScale ("[1,<4 3 2 3>,8, 12]") |% 12)
+          , note (trackScale "8*6" |+ 7)
+          ] )
+      , ("bass", struct rhytm $ s "bass" <| note (trackScale "1") # legato 1)
+      , ("guitar",struct rhytm $ s "git" <| note (trackScale "[1,5,8]") |- note 12 )
+      , ("drums", sew "<t!7 f>"
+          (stack [struct rhytm $ s "bd", s "<[hh*6]! [hh*3 hh*6]*2 hh*6 [rd*6]! [cr*6]! >", s "~ sn"])
+          ((stack [s "bd", s "tom:0*3 sn tom:1*3 tom:2*3 sn sn" # n "0 0 1 2 0 0"])  ))
+      ]
+    select key = findWithDefault (silence) key tcTracks
+
+do
+let midiScore' = midiScore {timeSignatures = [(8%1, 6, 3)], duration = 8, bpm = 150}
+toFile "/Users/mrreason/Documents/MidiExample/1.mid" (midiFile midiScore'
+  [
+    midiNoteTrack Lead1Square (select "lead") midiScore'
+    , midiNoteTrack ElectricBassFinger (select "bass" |- note 36) midiScore'
+    , midiNoteTrack AcousticGrandPiano (select "piano") midiScore'
+    , midiNoteTrack DistortionGuitar (select "guitar" |- note 12) midiScore'
+    , midiDrumTrack (select "drums") midiScore'])
+
+
+do
+d1 $ select "lead"
+d2 $ select "bass"
+d3 $ select "piano"
+d4 $ select "drums"
+d7 $ select "guitar"
+setcps 0.7
