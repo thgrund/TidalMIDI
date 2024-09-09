@@ -18,6 +18,17 @@ import qualified Data.EventList.Relative.TimeBody as EventList
 import Sound.MIDI.File.Save (toFile)
 import Sound.MIDI.General
 
+data TidalMIDIScore = TidalMIDIScore {
+    timeSignatures :: [(Time, Time, Int)],
+    bpm :: Double,
+    duration :: Time}
+
+midiScore = TidalMIDIScore {
+  timeSignatures = [(1 % 1, 2, 3)],
+  bpm = 120,
+  duration = 4
+}
+
 groupedEvents pt arc = groupBy (\ev1 ev2 -> whole ev1 == whole ev2) (sortOn part $ queryArc pt arc)
 
 extractNote (VN x) = unNote x
@@ -66,6 +77,66 @@ sortNoteOffEventsByEndTime (_, b1, _) (_, b2, _)
   | b1 < b2 = LT
   | b1 == b2 = EQ
 
+  {- | The `transformDur` transforms the time of events in TidalCycles in a way, that it would fit
+  a specific time signature in midi. The time signature will be applied till the first value of the
+  ts head is reached.
+
+  Example:
+
+  @
+  pt = note "<c ~! c*2>"
+  arc = Arc 0 4
+  @
+
+  This will be transformed to:
+
+  @
+  events = [("noteOn",0 % 1,0.0,0 % 1),("noteOff",1 % 1,0.0,1 % 1)
+           ,("noteOn",2 % 1,0.0,3 % 1),("noteOff",1 % 2,0.0,7 % 2)
+           ,("noteOn",0 % 1,0.0,7 % 2),("noteOff",1 % 2,0.0,4 % 1)]
+  @
+
+  With this time signature list:
+  @
+  ts = [(1 % 1, 1, 2),(2 % 1, 7, 2), (3 % 1, 9 , 3), (4 % 1, 2 , 2)]
+  @
+
+  You can then call transformDur to transform the TidalCycles events to match the defined time signature.
+  Otherwise every pattern will be transformed to 4/4 time signature.
+
+  @
+  transformDur ts events
+  -- result:
+  --  [("noteOn",0 % 1,0.0),("noteOff",1 % 4,0.0)
+  --  ,("noteOn",23 % 8,0.0),("noteOff",1 % 4,0.0)
+  --  ,("noteOn",0 % 1,0.0),("noteOff",1 % 4,0.0)]
+  @
+  -}
+
+transformDur:: (Data.String.IsString a1, Fractional a2, Integral b, Ord a2, Eq a1) => [(a2, a2, b)] -> [(a1, a2, c, a2)] -> [(a1, a2, c)]
+transformDur [] [] = []
+transformDur [] ((a2,b2,c2,_):[]) =  (a2,b2,c2) : (transformDur [] [])
+transformDur [] ((a2,b2,c2,_):xs) = ((a2,b2,c2)) : (transformDur [] xs)
+transformDur ((a1, b1, c1):xs) [] = []  -- Second list empty, stop transformation
+transformDur ((a1, b1, c1):xs) (("noteOff", dur, pitch, cycleCount):ys)
+  | a1 >= cycleCount = ("noteOff", calcRest dur  b1 c1, pitch) : transformDur ((a1, b1, c1):xs) ys
+  | otherwise          = transformDur xs (("noteOff", dur, pitch, cycleCount):ys)
+    where
+      calcRest dur nom den = (nom / (2 ^ den)) * dur
+transformDur ((a1, b1, c1):xs) (("noteOn", dur, pitch, cycleCount):ys)
+  | a1 >= cycleCount = ("noteOn", calcRest dur  b1 c1, pitch) : transformDur ((a1, b1, c1):xs) ys
+  | a1 < cycleCount = (fst calculatedRestDuration) : transformDur (snd calculatedRestDuration) ys
+  -- | otherwise = transformDur xs ((eventType, dur, pitch, cycleCount):ys)
+  where
+    calcRest dur nom den = (nom / (2 ^ den)) * dur
+    calculatedRestDuration = calcRestDuration ("noteOn", dur, pitch, cycleCount) ((a1, b1, c1):xs)
+    calcRestDuration ("noteOn", x, y, z) xs = (("noteOn", calcDurationSum (calcEventDuration (reverse $ fst splitted)), y), snd splitted)
+      where splitted = Data.List.partition (\(a,_,_) -> a <= z) (filter (\(a,_,_) -> z - x < a) xs)
+            calcEventDuration [] = []
+            calcEventDuration ((a1,b1,c1) : (a2, b2, c2) : xs) = (a1 - a2, b1, c1) : calcEventDuration ((a2, b2, c2) : xs)
+            calcEventDuration ((a,b,c) : xs) = (a - (z - x), b, c) : calcEventDuration []
+            calcDurationSum xs = foldl (\ acc (a, b, c) -> ((b / 2 ^ c) * a) + acc) 0 xs
+
 tcPatternToMidiEventTransformer pt arc ts= map (convert) groupedMidiNoteEvents
   where
     noteEventList = map nub $ convertToDesiredOutput $ groupedEvents (pt) (arc)
@@ -78,36 +149,18 @@ tcPatternToMidiEventTransformer pt arc ts= map (convert) groupedMidiNoteEvents
       let msgType = if eventType == "noteOn" then VoiceMsg.NoteOn else VoiceMsg.NoteOff
       in  (durationToTicks duration, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (msgType (VoiceMsg.toPitch ((round pitch) + 60)) vel))))
 
-midiNoteTrack instrument pt dur ts=
+midiNoteTrack:: (Data.String.IsString k, Integral a, Ord k) =>
+     Instrument
+     -> Pattern (Map.Map k Value)
+     -> TidalMIDIScore
+     -> EventList.T a Event.T
+midiNoteTrack instrument pt midiScore=
    let chan = ChannelMsg.toChannel 3
        vel  = VoiceMsg.toVelocity 64
    in  EventList.fromPairList $
          (0, Event.MetaEvent (MetaEvent.TrackName (show instrument))):
          (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (VoiceMsg.ProgramChange (instrumentToProgram instrument))))):
-         (tcPatternToMidiEventTransformer (pt) (Arc 0 dur) ts)
-
--- Tidal Drum
-midiDrumTrack :: (Data.String.IsString k, Integral a, Integral b, Ord k) => Pattern (Map.Map k Value) -> Time -> [(Time, Time, b)] -> EventList.T a Event.T
-midiDrumTrack pt dur ts=
-   let chan = ChannelMsg.toChannel 9
-       vel  = VoiceMsg.toVelocity 64
-   in  EventList.fromPairList $
-         (0, Event.MetaEvent (MetaEvent.TrackName ("DrumKit"))):
-         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (VoiceMsg.ProgramChange (drumProgram))))):
-         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 101) 0))):
-         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 100) 0))):
-         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 6) 6))):
-         (tcPatternToMidiEventTransformer (addDrumMidiNote pt) (Arc 0 dur) ts)
-
-
-addDrumMidiNote :: (Ord k, Data.String.IsString k) => Pattern (Map.Map k Value) -> Pattern (Map.Map k Value)
-addDrumMidiNote = withEvents aux
-         where aux es = concatMap (steppityIn) (groupBy (\a b -> whole a == whole b) $ es)
-               steppityIn xs = mapMaybe (\(n, ev) -> (transform ev)) $ enumerate xs
-               transform (Event c (Just (Arc s e)) a' v) = return (Event c (Just (Arc s e)) a' (newValueMap v))
-               noteValue v = fromMaybe (VN 0) (Data.Map.lookup "n" v)
-               soundValue v = fromMaybe (VS "") (Data.Map.lookup "s" v)
-               newValueMap x = insert "note" (VN ((mapTCDrumToGeneralMIDI (soundValue x, noteValue x)) - 60 )) x
+         (tcPatternToMidiEventTransformer (pt) (Arc 0 (duration midiScore)) (timeSignatures midiScore))
 
 mapTCDrumToGeneralMIDI :: (Value, Value) -> Note
 mapTCDrumToGeneralMIDI (VS "bd", _) = 36
@@ -132,8 +185,31 @@ mapTCDrumToGeneralMIDI (VS "ch", _) = 52
 mapTCDrumToGeneralMIDI (VS "mi", _) = 55
 mapTCDrumToGeneralMIDI (_, _) = -1
 
+addDrumMidiNote :: (Ord k, Data.String.IsString k) => 
+    Pattern (Map.Map k Value)
+    -> Pattern (Map.Map k Value)
+addDrumMidiNote = withEvents aux
+         where aux es = concatMap (steppityIn) (groupBy (\a b -> whole a == whole b) $ es)
+               steppityIn xs = mapMaybe (\(n, ev) -> (transform ev)) $ enumerate xs
+               transform (Event c (Just (Arc s e)) a' v) = return (Event c (Just (Arc s e)) a' (newValueMap v))
+               noteValue v = fromMaybe (VN 0) (Data.Map.lookup "n" v)
+               soundValue v = fromMaybe (VS "") (Data.Map.lookup "s" v)
+               newValueMap x = insert "note" (VN ((mapTCDrumToGeneralMIDI (soundValue x, noteValue x)) - 60 )) x
 
--- Create time signature track for midiFile
+-- Tidal Drum
+midiDrumTrack :: (Data.String.IsString k, Integral a, Ord k) => Pattern (Map.Map k Value) -> TidalMIDIScore -> EventList.T a Event.T
+midiDrumTrack pt midiScore=
+   let chan = ChannelMsg.toChannel 9
+       vel  = VoiceMsg.toVelocity 64
+   in  EventList.fromPairList $
+         (0, Event.MetaEvent (MetaEvent.TrackName ("DrumKit"))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice (VoiceMsg.ProgramChange (drumProgram))))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 101) 0))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 100) 0))):
+         (0, Event.MIDIEvent (ChannelMsg.Cons chan (ChannelMsg.Voice $ VoiceMsg.Control (VoiceMsg.toController 6) 6))):
+         (tcPatternToMidiEventTransformer (addDrumMidiNote pt) (Arc 0 (duration midiScore)) (timeSignatures midiScore))
+
+         -- Create time signature track for midiFile
 calculateTimeSignatures:: (RealFrac b, Integral a) => [(b, b, Int)] -> [(a, Event.T)]
 calculateTimeSignatures [] = []
 calculateTimeSignatures (x:[]) = createSignatureEvent (x) : (calculateTimeSignatures [])
@@ -142,6 +218,9 @@ calculateTimeSignatures ((a1,b1,c1):(a2,b2,c2):xs) = (createSignatureEvent (a1 -
     createSignatureEvent :: (RealFrac a1, Integral a2) => (a1, a1, Int) -> (a2, Event.T)
     createSignatureEvent (a, b, c) = (round ((480 * (b / (2 ^^ c)) * 4) * a), Event.MetaEvent (MetaEvent.TimeSig (round b) c 24 8))
 
+createSignatureEvent :: (RealFrac a1, Integral a2) => (a1, a1, Int) -> (a2, Event.T)
+createSignatureEvent (a, b, c) = (round ((480 * (b / (2 ^^ c)) * 4) * a), Event.MetaEvent (MetaEvent.TimeSig (round b) c 24 8))
+
 shiftTimeSignatures :: Num a => [(a, b)] -> [(a, b)]
 shiftTimeSignatures [] = []  -- Handle empty list case
 shiftTimeSignatures ((x, event1):rest) = (0, event1) : shiftRest x rest
@@ -149,58 +228,10 @@ shiftTimeSignatures ((x, event1):rest) = (0, event1) : shiftRest x rest
     shiftRest _ [] = []
     shiftRest prevTicks ((ticks, event):xs) = (prevTicks, event) : shiftRest ticks xs
 
-{- | The `transformDur` transforms the time of events in TidalCycles in a way, that it would fit
-a specific time signature in midi. The time signature will be applied till the first value of the
-ts head is reached.
-
-Example:
-
-@
-pt = note "<c ~! c*2>"
-arc = Arc 0 4
-@
-
-This will be transformed to:
-
-@
-events = [("noteOn",0 % 1,0.0,0 % 1),("noteOff",1 % 1,0.0,1 % 1)
-         ,("noteOn",2 % 1,0.0,3 % 1),("noteOff",1 % 2,0.0,7 % 2)
-         ,("noteOn",0 % 1,0.0,7 % 2),("noteOff",1 % 2,0.0,4 % 1)]
-@
-
-With this time signature list:
-@
-ts = [(1 % 1, 1, 2),(2 % 1, 7, 2), (3 % 1, 9 , 3), (4 % 1, 2 , 2)]
-@
-
-You can then call transformDur to transform the TidalCycles events to match the defined time signature.
-Otherwise every pattern will be transformed to 4/4 time signature.
-
-@
-transformDur ts events
--- result:
---  [("noteOn",0 % 1,0.0),("noteOff",1 % 4,0.0)
---  ,("noteOn",23 % 8,0.0),("noteOff",1 % 4,0.0)
---  ,("noteOn",0 % 1,0.0),("noteOff",1 % 4,0.0)]
-@
--}
-transformDur:: (Data.String.IsString a1, Fractional a2, Integral b, Ord a2, Eq a1) => [(a2, a2, b)] -> [(a1, a2, c, a2)] -> [(a1, a2, c)]
-transformDur [] [] = []
-transformDur [] ((a2,b2,c2,_):[]) =  (a2,b2,c2) : (transformDur [] [])
-transformDur [] ((a2,b2,c2,_):xs) = ((a2,b2,c2)) : (transformDur [] xs)
-transformDur ((a1, b1, c1):xs) [] = []  -- Second list empty, stop transformation
-transformDur ((a1, b1, c1):xs) (("noteOff", dur, pitch, cycleCount):ys)
-  | a1 >= cycleCount = ("noteOff", calcRest dur  b1 c1, pitch) : transformDur ((a1, b1, c1):xs) ys
-  | otherwise          = transformDur xs (("noteOff", dur, pitch, cycleCount):ys)
-transformDur ((a1, b1, c1):xs) (("noteOn", dur, pitch, cycleCount):ys)
-  | a1 >= cycleCount = ("noteOn", calcRest dur  b1 c1, pitch) : transformDur ((a1, b1, c1):xs) ys
-  | a1 < cycleCount = (fst calculatedRestDuration) : transformDur (snd calculatedRestDuration) ys
-  -- | otherwise = transformDur xs ((eventType, dur, pitch, cycleCount):ys)
-  where
-    calculatedRestDuration = calcRestDuration ("noteOn", dur, pitch, cycleCount) ((a1, b1, c1):xs)
-    calcRestDuration ("noteOn", x, y, z) xs = (("noteOn", calcDurationSum (calcEventDuration (reverse $ fst splitted)), y), snd splitted)
-      where splitted = Data.List.partition (\(a,_,_) -> a <= z) (filter (\(a,_,_) -> z - x < a) xs)
-            calcEventDuration [] = []
-            calcEventDuration ((a1,b1,c1) : (a2, b2, c2) : xs) = (a1 - a2, b1, c1) : calcEventDuration ((a2, b2, c2) : xs)
-            calcEventDuration ((a,b,c) : xs) = (a - (z - x), b, c) : calcEventDuration []
-            calcDurationSum xs = foldl (\ acc (a, b, c) -> ((b / 2 ^ c) * a) + acc) 0 xs
+midiFile ::  TidalMIDIScore -> [MidiFile.Track] -> MidiFile.T
+midiFile midiScore tracks =
+   let createTimeSignatureEvents ts= shiftTimeSignatures $ reverse $ calculateTimeSignatures (reverse ts)
+   in  MidiFile.Cons MidiFile.Parallel (MidiFile.Ticks tick) $
+    [EventList.fromPairList $
+      (0, Event.MetaEvent (MetaEvent.SetTempo (round ((1.0 / ( bpm midiScore)) * 60000000)))) : (createTimeSignatureEvents (timeSignatures midiScore))
+    ] ++ tracks
